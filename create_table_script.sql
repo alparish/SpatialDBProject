@@ -13,6 +13,13 @@ CREATE TABLE taxi_trips (
     CONSTRAINT PK_taxi_trips PRIMARY KEY CLUSTERED (taxi_id, trip_id, datetime)
 );
 
+create table Trajectories
+(
+	Id int,
+	Shape varchar(max),
+	ShapeGeography geography,
+)
+
 SELECT t.taxi_id, t.trip_id, t.datetime, t.longitude, t.latitude, t.location
 FROM dbo.taxi_trips as t 
 GO
