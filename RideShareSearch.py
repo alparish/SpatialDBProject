@@ -281,9 +281,9 @@ def find_intersections(usertraj):
         raise
 
     sql_intersect = """
-        SELECT TOP 20 T2.Id, Area = T1.ShapeGeography.STBuffer(20).STIntersection(T2.ShapeGeography.STBuffer(20)).STArea()
+        SELECT TOP 30 T2.Id, Area = T1.ShapeGeography.STBuffer(30).STIntersection(T2.ShapeGeography.STBuffer(30)).STArea()
         FROM Trajectories T1 JOIN Trajectories T2
-        ON T1.ShapeGeography.STBuffer(20).STIntersects(T2.ShapeGeography.STBuffer(20))=1 AND T1.Id = ? AND T2.Id != T1.Id
+        ON T1.ShapeGeography.STBuffer(30).STIntersects(T2.ShapeGeography.STBuffer(30))=1 AND T1.Id = ? AND T2.Id != T1.Id
         ORDER BY Area DESC;
         """
 
@@ -498,8 +498,109 @@ def weighted_dtw_on_intersections(usertraj, result, time_weight, distance_weight
     cursor.close()
     conn.close()
 
+# usertraj is the original user trajectory, 
+# result is a collection of trajectories running close to the user trajectory
+# the time, distance, and order weight are parameters established by the user    
+def randomized_weighted_dtw_on_intersections(usertraj, result, time_weight, distance_weight, order_weight):
+    server = 'localhost'
+    database = 'master'
+    
+    user_info = usertraj.loc[:, ['latitude', 'longitude', 'timestamp', 'id']]
+    permuted_traj = user_info.copy()
+    all_traj = user_info.copy()
+    user_array = user_info.to_numpy()
+    user_start_time = usertraj.iloc[0]['timestamp']
+    dtw_min = dtw_min = float('inf')
+
+    conn_str = (
+        'Driver={ODBC Driver 18 for SQL Server};'
+        f'Server={server};'
+        f'Database={database};'
+        'Trusted_Connection=yes;'
+        'TrustServerCertificate=yes;'
+    )
+    
+    # Create connection
+    conn = pyodbc.connect(conn_str)
+    cursor = conn.cursor()
+    print("Connected to the database inside weighted dtw")
+
+    # for every permutation of the user's points,
+    n = len(usertraj)
+    seq = list(itertools.chain(range(0, n)))
+    permutations = list(itertools.islice(itertools.permutations(seq),0, n*(n-1), n-1))
+    permutations_as_array = np.array(permutations)
+    min_id = 0
+    for i in range(n):
+        permuted_traj = user_info.sample(frac=1)
+        print(permuted_traj)
+        
+        
+        perm_array = permuted_traj.index.to_numpy()
+        print(perm_array)
+
+        user_lat = permuted_traj ['latitude']
+        user_long = permuted_traj['longitude']
+
+        # Get the starting point's coordinates
+        user_start_lat = user_lat.iloc[0]
+        user_start_long = user_long.iloc[0]
+
+        order_dist = calculate_single_inversion_distance(perm_array)
+        print(order_dist)
+        order_scale = 1 + order_dist * order_weight
+        
+        for row in result:
+            traj_id = row[0]
+
+            sql_select = """
+                SELECT latitude, longitude, datetime, id
+                FROM taxi_trips
+                WHERE id = ?
+                ORDER BY seq ASC;
+            """
+            cursor.execute(sql_select, traj_id)
+            traj_match = cursor.fetchall()
+
+            #calculate the scale factors
+            match_start_lat, match_start_long, match_start_time, _ = traj_match[0]
+            match_start_time = pd.to_datetime(match_start_time)
+            start_distance = geodesic((user_start_lat, user_start_long), (match_start_lat, match_start_long)).miles
+            time_diff = float(abs((user_start_time - match_start_time).total_seconds() / 3600))
+            distance_scale = 1 + start_distance * distance_weight
+            time_scale = 1 + time_diff * time_weight
+
+            # any new minimum weighted dtw must beat the current dtw / product of scales
+            dtw_to_beat = dtw_min / (distance_scale * time_scale * order_scale)
+            dtw_val = quick_dtw(user_array, traj_match, dtw_to_beat)
+            weighted_dtw_val = dtw_val * distance_scale * time_scale * order_scale
+
+            if weighted_dtw_val < dtw_min:
+                dtw_min = weighted_dtw_val
+                min_id = traj_id
+
+    # re-fetch just the best match to plot it
+    sql_select = """
+            SELECT latitude, longitude, datetime, id
+            FROM taxi_trips
+            WHERE id = ?
+            ORDER BY seq ASC;
+    """
+
+    cursor.execute(sql_select, min_id)
+    traj_match = cursor.fetchall()
+    for row in traj_match:
+        new_row = {'latitude': row[0], 'longitude': row[1], 'timestamp': row[2], 'id': row[3]}
+        all_traj.loc[len(all_traj)] = new_row
+    
+    plot_trajectories(all_traj)
+
+    conn.commit()
+    cursor.close()
+    conn.close()
+
 def plot_trajectories(trajectories):
-    apikey = "AIzaSyA2LDQ5OjMPm8TmX290egK1uCv1o80AJvw"
+    apikey = "AIzaSyAxdSNvRWDOUMvei0DFGxywdmsFTjwbbqw"
 
     gmap = gmplot.GoogleMapPlotter(trajectories['latitude'][0], trajectories['longitude'][0], 13, apikey=apikey)
 
@@ -529,7 +630,7 @@ def test():
     usertraj = get_trajectory()
     time_val, distance_val, order_val = get_parameters()
     result = find_intersections(usertraj)
-    weighted_dtw_on_intersections(usertraj, result, time_val, distance_val, order_val)
+    randomized_weighted_dtw_on_intersections(usertraj, result, time_val, distance_val, order_val)
 
 def test_loop():
     for i in range(1, 30):
